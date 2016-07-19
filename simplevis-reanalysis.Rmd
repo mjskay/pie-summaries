@@ -16,7 +16,7 @@ First, reading in the data and doing a bit of work to calculate error and reorde
 ```{r message=FALSE}
 library(dplyr)
 
-sv <- read.csv("data/simplevis.csv", sep="\t") %>%
+sv <- read.csv("data/simplevis.csv") %>%
 	mutate(error = Estimate-Value,
 		   Type = factor(Type,
 		   			  levels=c("squarepie", "bars", "piechart", "donut"),

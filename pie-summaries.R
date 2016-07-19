@@ -22,8 +22,6 @@ plotCIs <- function(dataFrame, x_variable, y_variable, label, zeroLine=NA) {
 	p
 }
 
-setwd("~/Documents/src/pie-summaries")
-
 # data was reshaped in Google Sheets, and opposite answer corrections were calculated here: https://docs.google.com/spreadsheets/d/1ykUK7l82OZAMIvE8jHLjqYt6GmsKuTl934qqgxZ2faE/edit?usp=sharing
 # aaa = arcs angles areas
 aaa <- read.csv("data/arcs-angles-areas-merged.csv") %>%
