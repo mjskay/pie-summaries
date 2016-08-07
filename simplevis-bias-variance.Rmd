@@ -1,0 +1,145 @@
+---
+title: "Reanalysis of BELIV Paper Study Data"
+author: "Matthew Kay"
+date: "July 18, 2016"
+output: html_document
+---
+
+Based on `simpleviz-reanalysis.Rmd`.
+
+# Setup
+
+## Imports
+
+```{r setup}
+library(dplyr)
+library(ggplot2)
+import::from(gamlss, gamlss, random, re)
+import::from(gamlss.dist, 
+    NO, dNO, pNO, qNO, rNO, 
+    TF, dTF, pTF, qTF, rTF)
+import::from(gamlss.tr, gen.trun)
+```
+
+## GGplot theme
+
+```{r theme}
+theme_set(theme_light())
+```
+
+# Load and clean data
+
+First, reading in the data and doing a bit of work to calculate error and reorder and rename the charts. We called the study _simplevis_ back then, so _sv_ is the prefix for the datasets.
+
+```{r message=FALSE}
+sv <- read.csv("data/simplevis.csv") %>%
+	mutate(
+	    Estimate = Estimate,
+	    Value = Value,
+	    error = Estimate-Value
+   )
+```
+
+
+# Explore first
+
+Let's see the shape of people's error. In particular, we're interested in Square Pie, which I suspect people are reading as two bar charts (one for the tens column and one for the ones column), so we should see two peaks at +-10 on either side of 0 for that chart.
+
+```{r}
+sv %>%
+    ggplot(aes(x = error)) +
+    stat_density() + 
+    geom_vline(xintercept = 0, linetype="dashed", color="red") +
+    facet_wrap(~Type)
+```
+
+And that is what we see. Let's see that as estimate versus value:
+
+```{r}
+sv %>%
+    ggplot(aes(x = Value, y = Estimate)) +
+    geom_point(alpha = 0.1) +
+    geom_abline(intercept = 0, slope = 1, color = "red") +
+    facet_wrap(~Type)
+```
+
+And again we see the additional lines at +-10 for the square pie. I assume this happens when someone's estimate of the tens column (reading of the vertical "bar"" that is part of the square pie) is off by one, but their estimate of the ones column (reading of the horizontal "bar" that is part of the square pie) is still decent. 
+
+Another thing worth noting: overall, people don't appear to be biased in any of the conditions: note how the estimates fall along the red line for `y = x`.
+
+Let's fit a model to this (ignoring the off-by-ten errors in square pie for now):
+
+```{r}
+gen.trun(c(0, 1), family=NO, type="both")
+gen.trun(c(0, 1), family=TF, type="both")
+m = gamlss(Estimate ~ Value * Type, 
+    sigma.formula = ~ Type + random(ID),
+    data=sv, family=TF)
+```
+
+```{r}
+transform_data = function(d) {
+    capture.output({
+        d = cbind(select(d, -Estimate), glimmer(Estimate ~ Value * Type + (1|ID), data=d)$d)
+        d$ID = as.numeric(d$ID)
+    })
+    d
+}
+
+m = map(
+    alist(
+        Estimate ~ dnorm( mu , sigma ),
+        mu <- Intercept +
+            b_Value*Value +
+            b_Typedonut*Typedonut +
+            b_Typepiechart*Typepiechart +
+            b_Typesquarepie*Typesquarepie +
+            b_Value_X_Typedonut*Value_X_Typedonut +
+            b_Value_X_Typepiechart*Value_X_Typepiechart +
+            b_Value_X_Typesquarepie*Value_X_Typesquarepie,
+        # +
+            # v_Intercept[ID],
+        Intercept ~ dnorm(0,10),
+        b_Value ~ dnorm(0,10),
+        b_Typedonut ~ dnorm(0,10),
+        b_Typepiechart ~ dnorm(0,10),
+        b_Typesquarepie ~ dnorm(0,10),
+        b_Value_X_Typedonut ~ dnorm(0,10),
+        b_Value_X_Typepiechart ~ dnorm(0,10),
+        b_Value_X_Typesquarepie ~ dnorm(0,10),
+        # v_Intercept[ID] ~ dnorm(0,sigma_ID),
+        # sigma_ID ~ dcauchy(0,2),
+        sigma ~ dcauchy(0,2)
+    ),
+    data = transform_data(sv)
+)
+```
+
+```{r}
+predictions = expand.grid(
+        Value = 1:99,
+        Type = factor(levels(sv$Type)),
+        Estimate = 0,
+        ID = factor("p01", levels = levels(sv$ID))
+    ) %>%
+    transform_data() %>%
+    select(-Estimate) %>%
+    tidy_link(m) %>%
+    mean_qi() %>%
+    tidy_sim(m) %>%
+    mean_qi(Estimate)
+```
+
+```{r}
+sv %>%
+    ggplot(aes(x = Value, y = Estimate)) +
+    geom_point(alpha = 0.2) +
+    geom_abline(intercept = 0, slope = 1, color="red") +
+    geom_abline(intercept = 100, slope = -1, color="gray50", linetype= "dashed") +
+    geom_ribbon(aes(ymin = mu.lower, ymax = mu.upper), data = predictions) +
+    geom_line(aes(y = mu), data = predictions) +
+    facet_wrap(~ Type)
+```
+
+
+
