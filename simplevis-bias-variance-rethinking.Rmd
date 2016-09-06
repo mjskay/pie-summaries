@@ -77,7 +77,7 @@ head(sv)
 
 Let's see the shape of people's error. We will particularly be interested in `squarepie`, which I suspect people are reading essentially as two bar charts (one for the tens column and one for the ones column), but let's start by looking at all of the responses versus the actual probability. We'll include the line `y = x` (black line) and a plain-old linear regression (red) to get a sense of the shape of things:
 
-```{r}
+```{r, fig.width=10, fig.height=10}
 sv %>%
     ggplot(aes(x = p, y=response)) +
     geom_point(alpha = 0.2, size = 1) +
@@ -90,7 +90,7 @@ Overall, the first impression here is that people's estimates look pretty good i
 
 We're also seeing something odd in `squarepie`: there are two faint lines in the error parallel to the central line. Theses lines are at exactly `+-10` from `y = x`. One way to think of a square pie graph might be that it decomposes into two bar graphs: a vertical one representing the 10s column of `p` (0, 10, 20, ...), and a horizontal bar graph stuck on top of it representing the ones column (0, 1, 2, 3, ...). Thus, say the true value (`p`) is `36` and someone misreads the tens column as `4`, they might respond with `45` or `46` or `47`. We can see this phenomenon more easily by looking at density plots of the error (the difference between people's responses and the actual probability depicted):
 
-```{r}
+```{r, fig.width=10, fig.height=10}
 sv %>%
     ggplot(aes(x = response - p)) +
     stat_density() +
