@@ -1,0 +1,1067 @@
+---
+title: "Reanalysis of BELIV Paper Study Data"
+author: "Matthew Kay"
+date: "July 18, 2016"
+output: html_document
+---
+
+Based on `simpleviz-reanalysis.Rmd`.
+
+# Setup
+
+## Imports
+
+```{r setup}
+library(dplyr)
+library(ggplot2)
+library(metabayes)
+library(tidybayes)
+library(rstan)
+library(rethinking)
+import::from(gamlss, gamlss, random, re)
+import::from(gamlss.dist, 
+    NO, dNO, pNO, qNO, rNO, 
+    TF, dTF, pTF, qTF, rTF)
+import::from(gamlss.tr, gen.trun, trun.r)
+```
+
+## GGplot theme
+
+```{r theme}
+theme_set(theme_light())
+```
+
+## Stan setup
+
+```{r stan}
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+# Load and clean data
+
+First, let's read in the data:
+
+```{r message=FALSE}
+sv <- read.csv("data/simplevis.csv") %>%
+    transmute(
+        p = Value,
+        response = Estimate,
+        participant = ID,
+        vis = Type,
+        confidence = ordered(Confidence, levels=c("low","medium","high")),
+        response_time = ResponseTime
+    )
+head(sv)
+```
+
+
+# Explore first
+
+Let's see the shape of people's error. We will particularly be interested in `squarepie`, which I suspect people are reading essentially as two bar charts (one for the tens column and one for the ones column), but let's start by looking at all of the responses versus the actual probability. We'll include the line `y = x` (black line) and a plain-old linear regression (red) to get a sense of the shape of things:
+
+```{r}
+sv %>%
+    ggplot(aes(x = p, y=response)) +
+    geom_point(alpha = 0.2, size = 1) +
+    geom_abline(intercept = 0, slope=1, size = .5) + 
+    stat_smooth(method = lm, color="red", se=FALSE) +
+    facet_wrap(~vis)
+```
+
+Overall, the first impression here is that people's estimates look pretty good in all of the conditions, and that generally speaking there doesn't seem to be any big biases here: the estimates generally fall the line `y = x`. The top end of some of the conditions *might* show some underestimation, but it is not clear at this stage if that is a result of bias or variance: when you have *any* variance in the response up against a ceiling or floor (0 or 100), you should expect the mean to move away from that ceiling/floor. Thus there might be a bias in the *mean* response, but not necessarily the *mode* (most likely) response.
+
+We're also seeing something odd in `squarepie`, which was actually what I anticipated (and why I wrote this page): there are two faint lines in the error parallel to the central line. Theses lines are at exactly `+-10` from `y = x`. One way to think of a square pie graph might be that it decomposes into two bar graphs: a vertical one representing the 10s column of `p` (0, 10, 20, ...), and a horizontal bar graph stuck on top of it representing the ones column (0, 1, 2, 3, ...). Thus, say the true value (`p`) is `36` and someone misreads the tens column as `4`, they might respond with `45` or `46` or `47`. We can see this phenomenon more easily by looking at density plots of the error (the difference between people's responses and the actual probability depicted):
+
+```{r}
+sv %>%
+    ggplot(aes(x = response - p)) +
+    stat_density() +
+    facet_wrap(~vis) +
+    geom_vline(xintercept = 0, color="red") +
+    coord_cartesian(xlim=c(-20,20))
+```
+
+Again we see that all of the visualizations are basically unbiased (the mode of the error---its peak---basically coincides with zero for each vis). Also note the bumps in density at +-10 for `squarepie`, corresponding to off-by-one errors in estimates of the tens column.
+
+Let's see 1) if we can do a reasonable job of analyzing these first 
+
+
+```{r}
+sv %>%
+    filter(vis == "squarepie") %>%
+    filter(participant %in% paste0("p", 40:50)) %>%
+    ggplot(aes(x = p, y=response)) +
+    geom_point() +
+    # geom_line(aes(color = participant)) +
+    stat_smooth(aes(group=participant), method=lm, se=FALSE) +
+    geom_abline(intercept = 0, slope=1)+
+    geom_abline(intercept = 100, slope=-1)+
+    facet_wrap(~participant)
+```
+
+```{r}
+sv %>%
+    filter(vis == "squarepie") %>%
+    filter(participant %in% paste0("p", 10:20)) %>%
+    ggplot(aes(x = response - p)) +
+    stat_density() + 
+    geom_vline(xintercept = 0, linetype="dashed", color="red") +
+    geom_vline(xintercept = -10, linetype="dashed", color="red") +
+    geom_vline(xintercept = 10, linetype="dashed", color="red") 
+    # facet_wrap(~participant)
+```
+
+And that is what we see. Let's see that as estimate versus value:
+
+```{r}
+sv %>%
+    ggplot(aes(x = p, y = response)) +
+    geom_point(alpha = 0.1) +
+    geom_abline(intercept = 0, slope = 1, color = "red") +
+    facet_wrap(~vis)
+```
+
+And again we see the additional lines at +-10 for the square pie. I assume this happens when someone's estimate of the tens column (reading of the vertical "bar"" that is part of the square pie) is off by one, but their estimate of the ones column (reading of the horizontal "bar" that is part of the square pie) is still decent. 
+
+Another thing worth noting: overall, people don't appear to be biased in any of the conditions: note how the estimates fall along the red line for `y = x`.
+
+Let's fit a model to this (ignoring the off-by-ten errors in square pie for now):
+
+
+# Model for bars, student t
+
+```{r}
+sv.bars = sv %>%
+    filter(vis == "bars")
+```
+
+```{r}
+m.bars.meta = metastan(
+    data = {
+        n : int(lower=1)                #number of obervations
+        n_participant : int(lower=1)
+        
+        p : vector[n]
+        response : vector[n]
+        participant[n] : int
+    },
+    parameters = {
+        mu_intercept : real             #intercept at p = 50 (relative to response = 50)
+        mu_b_p : real                   #slope
+        
+        sigma_intercept : real          #average spread of responses (log-scale)
+        sigma_v_participant_raw : vector[n_participant]
+        
+        sigma_v_participant_sd : real(lower=0)  #variance of participants' variances
+    },
+    transformed_parameters = {
+        mu : vector[n]
+        sigma : vector[n]
+        sigma_v_participant : vector[n_participant]
+
+        sigma_v_participant = sigma_v_participant_raw * sigma_v_participant_sd
+        for (i in 1:n) {
+            sigma[i] <- exp(sigma_intercept + sigma_v_participant[participant[i]])
+        }
+
+        #mode response given p. The -50 ... + 50 makes it so that mu_intercept can
+        #be interpreted as the offset in the response from 50 when p = 50. It also
+        #helps make sampling more efficient by making mu_intercept and m_b_p
+        #uncorrelated.
+        mu <- mu_intercept + mu_b_p * (p - 50) + 50
+    },
+    model = {
+        #this implies a prior scale of between about .05 and 10
+        sigma_intercept ~ normal(-0.4, 1.3)
+        #prior that most people are within 10x as good or 10x as bad 
+        #as the average person's precision
+        sigma_v_participant_sd ~ normal(0, 1.15)
+        #The next line implies sigma_v_participant ~ normal(0, sigma_v_participant_sd)
+        #it is done to improve sampling. See the chapter on optimizing Stan code in the
+        #Stan reference manual.
+        sigma_v_participant_raw ~ normal(0, 1) 
+        
+        #prior on bias is around +- 5
+        mu_intercept ~ normal(0, 2.5)
+        #prior on slope is that it is close to 1 (this is around 1 +- 0.5, which a slope of
+        #0 would essentially imply "no signal" --- that people's estimates of the response are
+        #unrelated to the true p).
+        mu_b_p ~ normal(1, 0.5)
+
+        #I use a student-t distribution with a low df (specifically 3)
+        #instead of a normal distribution to account for outliers (essentially as a form of
+        #robust regression). I also considered using a beta distribution (since it is naturally
+        #bounded) but it is less robust to outliers.
+        #Censoring comes in two parts: interval censoring to account
+        #for rounding of observations (since the responses are all whole numbers), and 
+        #censoring at the endpoints to account for the bounded nature of the responses (from
+        #1 to 99).
+        for (i in 1:n) {
+            if (response[i] == 1) { 
+                #censoring at < 1.5: the lowest recordable response appears to be
+                #1 (as an integer)
+                target %+=% student_t_lcdf(1.5  | 3, mu[i], sigma[i])
+            }
+            else if (response[i] == 99) {
+                #censoring at > 98.5: the highest recordable response appears to be
+                #99 (as an integer)
+                target %+=% student_t_lccdf(98.5  | 3, mu[i], sigma[i])
+            }
+            else {
+                #interval censoring: since responses were recorded only to whole digits,
+                #assume a response of x is an interval-censored response from somewhere
+                #in [x - 0.5, x + 0.5]
+                target %+=% log_diff_exp(
+                    student_t_lcdf(response[i] + 0.5  | 3, mu[i], sigma[i]),
+                    student_t_lcdf(response[i] - 0.5  | 3, mu[i], sigma[i])
+                )
+            }
+        }
+    }
+)
+m.bars.stan = stan_model(model_code = as.character(m.bars.meta))
+```
+
+```{r}
+fit.bars.v = vb(m.bars.stan, data = compose_data(sv.bars), algorithm="meanfield")
+```
+
+```{r}
+summary(fit.bars, pars=c("mu_intercept","mu_b_p","sigma_intercept","sigma_v_participant_sd"))
+```
+
+
+Let's get some fitted values and residuals out from the model so we can inspect it.
+
+```{r}
+dresid = function(...) dTF(..., nu = 3)
+presid = function(...) pTF(..., nu = 3)
+rresid = function(...) rTF(..., nu = 3)
+
+fitted = fit.bars %>%
+    tidy_samples(c(mu, mu_offset, sigma)[i]) %>%
+    mutate(
+        predicted = rTF(n(), mu, sigma, 3),
+        predicted = ifelse(predicted < 1.5, 1, ifelse(predicted > 98.5, 99, predicted))
+    ) %>%
+    inner_join(mutate(sv.bars, i = 1:n()))
+
+residuals = fitted %>%
+    group_by(i, p, response, participant) %>%
+    summarise(
+        #randomized quantile residuals
+        p_resid_max = mean(predicted < response + 0.5),
+        p_resid_max = ifelse(p_resid_max == 0, 1/n(), p_resid_max),
+        p_resid_min = mean(predicted < response - 0.5),
+        p_resid_min = ifelse(p_resid_min == 1, (n() - 1)/n(), p_resid_min),
+        p_resid = runif(1, p_resid_min, p_resid_max),
+        z_resid = qnorm(p_resid),
+        mu = mean(mu),
+        predicted = sample(predicted, 1)
+    ) %>%
+    ungroup()
+```
+
+
+```{r}
+residuals %>% flatworm(z_resid, participant, ylim=NA) + facet_wrap(~.cuts)
+```
+
+```{r}
+residuals %>% flatworm(z_resid)
+```
+
+```{r}
+residuals %>% flatworm(z_resid, p)
+```
+
+
+```{r}
+samples = fit.bars %>%
+    tidy_samples(c(mu_intercept, mu_b_p, sigma_intercept, sigma_v_participant_sd)[])
+
+predictions = 
+    expand.grid(
+        p = 1:99
+    ) %>%
+    group_by(p) %>%
+    do({
+        cbind(., samples) %>%
+            mutate(
+                sigma_v_participant = rnorm(n(), 0, sigma_v_participant_sd),
+                sigma = exp(sigma_intercept + sigma_v_participant),
+                mu = mu_intercept + mu_b_p * (p - 50) + 50,
+                predicted = rTF(n(), mu, sigma, 3),
+                predicted = ifelse(predicted < 1.5, 1, ifelse(predicted > 98.5, 99, predicted))
+            )
+    }) %>%
+    mutate(error = predicted - p)
+```
+
+```{r}
+sv.bars %>%
+    ggplot(aes(x = response - p)) +
+    stat_density(fill=NA, color="red") +
+    stat_density(aes(x=round(predicted) - p), fill=NA, color="green", data=residuals, adjust=1)
+```
+
+```{r}
+fitted10 = fitted %>%
+    filter(.sample %in% 15:20)
+sv.bars %>%
+    ggplot(aes(x = response - p)) +
+    stat_density(fill=NA, color="black", size=1.5) +
+    stat_density(aes(x=round(predicted) - p, group = .sample), fill=NA, color="blue", data=fitted10, adjust=1) +
+    coord_cartesian(xlim=c(-20,20))
+```
+
+```{r}
+predictions %>%
+    # select(-mu) %>% rename(mu = predicted) %>%
+    mean_qi(mu) %>%
+    ggplot(aes(x = p, y = mu)) +
+    geom_point(aes(y = response), data=sv.bars, alpha=0.1) +
+    geom_ribbon(aes(ymin = mu.lower, ymax = mu.upper), alpha = 0.25) +
+    geom_abline(intercept = 0, slope = 1, color="gray50") +
+    geom_line(color="red")
+```
+
+```{r}
+predictions %>%
+    filter(.sample %in% 1:1000) %>%
+    ggplot(aes(x = p, y = predicted)) +
+    geom_point(alpha=0.1)
+```
+
+
+
+
+# Model for bars, beta with mode parameterization
+
+```{r}
+sv.bars = sv %>%
+    filter(vis == "bars")
+sv.bars.beta = sv.bars %>%
+    mutate(p = p/100, response = response/100)
+```
+
+## Model with nu
+
+```{r}
+m.bars.meta = metastan(
+    data = {
+        n : int(lower=1)                #number of obervations
+        n_participant : int(lower=1)
+        
+        p : vector[n]
+        response : vector[n]
+        participant[n] : int
+    },
+    parameters = {
+        mu_intercept : real             #intercept at p = 50 (relative to response = 50)
+        mu_b_p : real                   #slope
+        
+        sigma_intercept : real          #average spread of responses (log-scale)
+        sigma_v_participant_raw : vector[n_participant]
+        
+        sigma_v_participant_sd : real(lower=0)  #variance of participants' variances
+        
+        sigma_nu : vector(lower=0)[n]
+        
+        nu_minus_3 : real(lower=0)
+    },
+    transformed_parameters = {
+        mu : vector[n]
+        sigma : vector[n]
+        sigma_v_participant : vector[n_participant]
+
+        sigma_v_participant = sigma_v_participant_raw * sigma_v_participant_sd
+        for (i in 1:n) {
+            sigma[i] <- exp(sigma_intercept + sigma_v_participant[participant[i]])
+        }
+
+        #mode response given p. The -50 ... + 50 makes it so that mu_intercept can
+        #be interpreted as the offset in the response from 50 when p = 50. It also
+        #helps make sampling more efficient by making mu_intercept and m_b_p
+        #uncorrelated.
+        mu <- mu_intercept + mu_b_p * (p - 0.5) + 0.5
+    },
+    model = {
+        #this implies a prior scale of between about .05 and 10
+        sigma_intercept ~ normal(7.5, 1.25)
+        #prior that most people are within 10x as good or 10x as bad 
+        #as the average person's precision
+        sigma_v_participant_sd ~ normal(0, 1.15)
+        #The next line implies sigma_v_participant ~ normal(0, sigma_v_participant_sd)
+        #it is done to improve sampling. See the chapter on optimizing Stan code in the
+        #Stan reference manual.
+        sigma_v_participant_raw ~ normal(0, 1) 
+        
+        #prior on bias is around +- 5/100
+        mu_intercept ~ normal(0, 0.025)
+        #prior on slope is that it is close to 1 (this is around 1 +- 0.5, which a slope of
+        #0 would essentially imply "no signal" --- that people's estimates of the response are
+        #unrelated to the true p).
+        mu_b_p ~ normal(1, 0.1)
+
+        #add kurtosis to the distribution (as with a t distribution)
+        nu_minus_3 ~ exponential(R(1/29))
+        sigma_nu ~ scaled_inv_chi_square(3 + nu_minus_3, sigma)
+        
+        #I use a student-t distribution with a low df (specifically 3)
+        #instead of a normal distribution to account for outliers (essentially as a form of
+        #robust regression). I also considered using a beta distribution (since it is naturally
+        #bounded) but it is less robust to outliers.
+        #Censoring comes in two parts: interval censoring to account
+        #for rounding of observations (since the responses are all whole numbers), and 
+        #censoring at the endpoints to account for the bounded nature of the responses (from
+        #1 to 99).
+        for (i in 1:n) {
+            #mode and concentration parameterization of beta dist; see Kruschke
+            mode : real
+            concentration_minus_2 : real
+            alpha : real
+            beta : real
+            
+            if      (mu[i] < 0) { mode = 0 }
+            else if (mu[i] > 1) { mode = 1 }
+            else                { mode = mu[i] }
+            concentration_minus_2 = 1/sigma_nu[i]
+            alpha = mode * concentration_minus_2 + 1
+            beta = (1 - mode) * concentration_minus_2 + 1
+
+            # if (response[i] < .015) {
+                #censoring at < 1.5/100: the lowest recordable response appears to be
+                #1/100 (as an integer)
+                # target %+=% beta_lcdf(0.015  | alpha, beta)
+            # }
+            # else if (response[i] > .985) {
+                #censoring at > 98.5/100: the highest recordable response appears to be
+                #99/100 (as an integer)
+                # target %+=% beta_lccdf(0.985  | alpha, beta)
+            # }
+            # else {
+                response[i] ~ beta(alpha, beta)     
+            
+                #interval censoring: since responses were recorded only to whole digits,
+                #assume a response of x is an interval-censored response from somewhere
+                #in [x - 0.5, x + 0.5]
+                # target %+=% log_diff_exp(
+                    # beta_lcdf(response[i] + 0.005  | alpha, beta),
+                    # beta_lcdf(response[i] - 0.005  | alpha, beta)
+                # )
+            # }
+        }
+    },
+    generated_quantities = {
+        nu : vector[n]
+        
+        for (i in 1:n) {
+            nu[i] = nu_minus_3 + 3
+        }
+    }
+)
+m.bars.stan = stan_model(model_code = as.character(m.bars.meta))
+```
+
+## Model without nu
+
+```{r}
+m.bars.meta = metastan(
+    data = {
+        n : int(lower=1)                #number of obervations
+        n_participant : int(lower=1)
+        
+        p : vector[n]
+        response : vector[n]
+        participant[n] : int
+    },
+    parameters = {
+        mu_intercept : real             #intercept at p = 50 (relative to response = 50)
+        mu_b_p : real                   #slope
+        
+        sigma_intercept : real          #average spread of responses (log-scale)
+        sigma_v_participant_raw : vector[n_participant]
+        
+        sigma_v_participant_sd : real(lower=0)  #variance of participants' variances
+    },
+    transformed_parameters = {
+        mu : vector[n]
+        sigma : vector[n]
+        sigma_v_participant : vector[n_participant]
+
+        sigma_v_participant = sigma_v_participant_raw * sigma_v_participant_sd
+        for (i in 1:n) {
+            sigma[i] <- exp(sigma_intercept + sigma_v_participant[participant[i]])
+        }
+
+        #mode response given p. The -50 ... + 50 makes it so that mu_intercept can
+        #be interpreted as the offset in the response from 50 when p = 50. It also
+        #helps make sampling more efficient by making mu_intercept and m_b_p
+        #uncorrelated.
+        mu <- mu_intercept + mu_b_p * (p - 0.5) + 0.5
+    },
+    model = {
+        #this implies a prior scale of between about .05 and 10
+        sigma_intercept ~ normal(-7.5, 1.25)
+        #prior that most people are within 10x as good or 10x as bad 
+        #as the average person's precision
+        sigma_v_participant_sd ~ normal(0, 1.15)
+        #The next line implies sigma_v_participant ~ normal(0, sigma_v_participant_sd)
+        #it is done to improve sampling. See the chapter on optimizing Stan code in the
+        #Stan reference manual.
+        sigma_v_participant_raw ~ normal(0, 1) 
+        
+        #prior on bias is around +- 5/100
+        mu_intercept ~ normal(0, 0.025)
+        #prior on slope is that it is close to 1 (this is around 1 +- 0.5, which a slope of
+        #0 would essentially imply "no signal" --- that people's estimates of the response are
+        #unrelated to the true p).
+        mu_b_p ~ normal(1, 0.1)
+
+        #I use a student-t distribution with a low df (specifically 3)
+        #instead of a normal distribution to account for outliers (essentially as a form of
+        #robust regression). I also considered using a beta distribution (since it is naturally
+        #bounded) but it is less robust to outliers.
+        #Censoring comes in two parts: interval censoring to account
+        #for rounding of observations (since the responses are all whole numbers), and 
+        #censoring at the endpoints to account for the bounded nature of the responses (from
+        #1 to 99).
+        for (i in 1:n) {
+            #mode and concentration parameterization of beta dist; see Kruschke
+            mode : real
+            concentration_minus_2 : real
+            alpha : real
+            beta : real
+            
+            if      (mu[i] < 0) { mode = 0 }
+            else if (mu[i] > 1) { mode = 1 }
+            else                { mode = mu[i] }
+            concentration_minus_2 = 1/sigma[i]
+            alpha = mode * concentration_minus_2 + 1
+            beta = (1 - mode) * concentration_minus_2 + 1
+
+            # if (response[i] < .015) {
+                #censoring at < 1.5/100: the lowest recordable response appears to be
+                #1/100 (as an integer)
+                # target %+=% beta_lcdf(0.015  | alpha, beta)
+            # }
+            # else if (response[i] > .985) {
+                #censoring at > 98.5/100: the highest recordable response appears to be
+                #99/100 (as an integer)
+                # target %+=% beta_lccdf(0.985  | alpha, beta)
+            # }
+            # else {
+                response[i] ~ beta(alpha, beta)     
+            
+                #interval censoring: since responses were recorded only to whole digits,
+                #assume a response of x is an interval-censored response from somewhere
+                #in [x - 0.5, x + 0.5]
+                # target %+=% log_diff_exp(
+                    # beta_lcdf(response[i] + 0.005  | alpha, beta),
+                    # beta_lcdf(response[i] - 0.005  | alpha, beta)
+                # )
+            # }
+        }
+    }
+)
+m.bars.stan = stan_model(model_code = as.character(m.bars.meta))
+```
+
+## Analysis
+
+```{r}
+fit.bars.v = vb(m.bars.stan, data = compose_data(sv.bars.beta), algorithm="fullrank")
+```
+
+```{r}
+fit.bars = sampling(m.bars.stan, data = compose_data(sv.bars.beta), iter=400)
+    # init = function() {
+    #     list(
+    #         mu_intercept = 0,
+    #         mu_b_p = 1,
+    #         sigma_intercept = -7.5,
+    #         sigma_v_participant_raw = rnorm(nlevels(sv.bars.beta$participant), 0, 1),
+    #         sigma_v_participant_sd = 0.5
+    #     )
+    # }
+# )
+```
+
+
+```{r}
+summary(fit.bars, pars=c("mu_intercept","mu_b_p","sigma_intercept","sigma_v_participant_sd","nu_minus_3"))
+pairs(fit.bars, pars=c("mu_intercept","mu_b_p","sigma_intercept","sigma_v_participant_sd","nu_minus_3"))
+```
+
+
+Let's get some fitted values and residuals out from the model so we can inspect it.
+
+```{r}
+alpha_beta = function(mu, sigma) {
+    mode = ifelse(mu < 0, 0, ifelse(mu > 1, 1, mu))
+    concentration_minus_2 = 1/sigma
+    list(
+        alpha = mode * concentration_minus_2 + 1,
+        beta = (1 - mode) * concentration_minus_2 + 1
+    )    
+}
+dresid = function(x, mu, sigma) alpha_beta(mu, sigma) %$% dbeta(x, alpha, beta)
+presid = function(x, mu, sigma) alpha_beta(mu, sigma) %$% pbeta(x, alpha, beta)
+rresid = function(x, mu, sigma) alpha_beta(mu, sigma) %$% rbeta(x, alpha, beta)
+
+fitted = fit.bars %>%
+    tidy_samples(c(mu, sigma)[i]) %>%
+    mutate(
+        predicted = rresid(n(), mu, sigma),
+        predicted = ifelse(predicted < 0.01, 0.01, ifelse(predicted > 0.99, 0.99, predicted))
+    ) %>%
+    inner_join(mutate(sv.bars.beta, i = 1:n()))
+
+residuals = fitted %>%
+    group_by(i, p, response, participant) %>%
+    summarise(
+        # p_resid = mean(predicted < response),
+        # p_resid = 
+            # ifelse(p_resid == 0, runif(1, 0, 1/n()),
+            # ifelse(p_resid == 1, runif(1, (n() - 1)/n(), 1),
+            # p_resid)),
+        #randomized quantile residuals
+        p_resid_max = mean(predicted < response + 0.005),
+        p_resid_max = ifelse(p_resid_max == 0, 1/n(), p_resid_max),
+        p_resid_min = mean(predicted < response - 0.005),
+        p_resid_min = ifelse(p_resid_min == 1, (n() - 1)/n(), p_resid_min),
+        p_resid = runif(1, p_resid_min, p_resid_max),
+        z_resid = qnorm(p_resid),
+        mu = mean(mu),
+        predicted = sample(predicted, 1)
+    ) %>%
+    ungroup()
+```
+
+
+```{r}
+residuals %>% flatworm(z_resid, participant, ylim=NA) + facet_wrap(~.cuts)
+```
+
+```{r}
+residuals %>% flatworm(z_resid)
+```
+
+```{r}
+residuals %>% flatworm(z_resid, p)
+```
+
+
+```{r}
+samples = fit.bars %>%
+    tidy_samples(c(mu_intercept, mu_b_p, sigma_intercept, sigma_v_participant_sd, nu_minus_3)[])
+
+predictions = 
+    expand.grid(
+        p = (1:99)/100
+    ) %>%
+    group_by(p) %>%
+    do({
+        cbind(., samples) %>%
+            mutate(
+                sigma_v_participant = rnorm(n(), 0, sigma_v_participant_sd),
+                sigma = exp(sigma_intercept + sigma_v_participant),
+                nu = nu_minus_3 + 3,
+                sigma_nu = rinvchisq(n(), nu, sigma),
+                mu = mu_intercept + mu_b_p * (p - .50) + .50,
+                # mu = plogis(mu_intercept + mu_b_p * logit(p)),
+                predicted = rresid(n(), mu, sigma_nu),
+                predicted = ifelse(predicted < .015, .01, ifelse(predicted > 0.985, 0.99, predicted))
+            )
+    }) %>%
+    mutate(error = predicted - p)
+```
+
+```{r}
+sv.bars.beta %>%
+    ggplot(aes(x = response - p)) +
+    stat_density(fill=NA, color="red") +
+    stat_density(aes(x=predicted - p), fill=NA, color="green", data=residuals, adjust=1)
+```
+
+```{r}
+fitted10 = fitted %>%
+    filter(.sample %in% 15:20)
+sv.bars.beta %>%
+    ggplot(aes(x = response - p)) +
+    stat_density(fill=NA, color="black", size=1.5) +
+    stat_density(aes(x=predicted - p, group = .sample), fill=NA, color="blue", data=fitted10, adjust=1) +
+    coord_cartesian(xlim=c(-.2,.2))
+```
+
+```{r}
+predictions %>%
+    select(-mu) %>% rename(mu = predicted) %>%
+    mean_qi(mu) %>%
+    ggplot(aes(x = p, y = mu)) +
+    geom_point(aes(y = response), data=sv.bars.beta, alpha=0.1) +
+    geom_ribbon(aes(ymin = mu.lower, ymax = mu.upper), alpha = 0.25) +
+    geom_abline(intercept = 0, slope = 1, color="gray50") +
+    geom_line(color="red")
+```
+
+```{r}
+predictions %>%
+    filter(.sample %in% 1:1000) %>%
+    ggplot(aes(x = p, y = predicted)) +
+    geom_point(alpha=0.1)
+```
+
+
+# Model for square pie
+
+```{r}
+sv.sp = sv %>%
+    filter(vis == "squarepie")
+sv.sp.beta = sv.sp %>%
+    mutate(p = p/100, response = response/100)
+```
+
+## Model
+```{r}
+mu_scale = 1
+sigma_intercept_offset = -7.5
+# mu_scale = 100000000
+m.sp.meta = metastan(
+    data = {
+        n : int(lower=1)                #number of obervations
+        n_participant : int(lower=1)
+        
+        p : vector[n]
+        response : vector[n]
+        participant[n] : int
+    },
+    parameters = {
+        mu_intercept_raw : real             #intercept at p = 50 (relative to response = 50)
+        mu_b_p_raw : real                   #slope
+        
+        sigma_intercept_raw : real          #average spread of responses (log-scale)
+        sigma_v_participant_raw : vector[n_participant]
+        
+        sigma_v_participant_sd : real(lower=0)  #variance of participants' variances
+        
+        theta : real(lower=0, upper=1)  #probability of getting the tens column correct
+        
+        sigma_nu : vector(lower=0)[n]
+    },
+    transformed_parameters = {
+        mu_intercept : real             #intercept at p = 50 (relative to response = 50)
+        mu_b_p : real                   #slope
+        mu : vector[n]
+        sigma_intercept : real
+        sigma : vector[n]
+        sigma_v_participant : vector[n_participant]
+        theta_k : vector[3]
+
+        sigma_intercept = sigma_intercept_raw + R(sigma_intercept_offset)
+        sigma_v_participant = sigma_v_participant_raw * sigma_v_participant_sd
+        for (i in 1:n) {
+            sigma[i] <- exp(sigma_intercept + sigma_v_participant[participant[i]])
+        }
+
+        theta_k[1] <- (1 - theta) / 2   #probability of off-by-one (below) in tens column
+        theta_k[2] <- theta             #probability of getting the tens column exactly correct
+        theta_k[3] <- theta_k[1]        #probability of off-by-one (above) in tens column
+        
+        mu_intercept = mu_intercept_raw / R(mu_scale)
+        mu_b_p = 1 + mu_b_p_raw / R(mu_scale)
+        
+        #mode response given p. The -50 ... + 50 makes it so that mu_intercept can
+        #be interpreted as the offset in the response from 50 when p = 50. It also
+        #helps make sampling more efficient by making mu_intercept and m_b_p
+        #uncorrelated.
+        mu <- mu_intercept + mu_b_p * (p - .5) + .5
+    },
+    model = {
+        #this implies a prior scale of between about .05 and 10
+        sigma_intercept_raw ~ normal(R(-9 - sigma_intercept_offset), 1)
+        #prior that most people are within 10x as good or 10x as bad 
+        #as the average person's precision
+        sigma_v_participant_sd ~ normal(0, .25)
+        #The next line implies sigma_v_participant ~ normal(0, sigma_v_participant_sd)
+        #it is done to improve sampling. See the chapter on optimizing Stan code in the
+        #Stan reference manual.
+        sigma_v_participant_raw ~ normal(0, 1) 
+        
+        #prior on bias is around +- 5/100
+        mu_intercept_raw ~ normal(0, R(0.025 * mu_scale)) #=> mu_intercept ~ normal(0, 0.025)
+        #prior on slope is that it is close to 1 (this is around 1 +- 0.5, which a slope of
+        #0 would essentially imply "no signal" --- that people's estimates of the response are
+        #unrelated to the true p).
+        mu_b_p_raw ~ normal(0, R(0.1 * mu_scale)) #=> mu_b_p ~ normal(1, 0.1)
+
+        #prior on the proportion of estimates of the tens column that are correct 
+        #(in the neighborhood of 85-100%). Another way to think of this is a prior that
+        #the probability of an off-by-one error is about 0-15%.
+        theta ~ beta(20,1)
+        
+        #add kurtosis to the distribution (as with a t distribution)
+        sigma_nu ~ scaled_inv_chi_square(3, sigma)
+
+        #the following mess describes a mixture of three censored student-t distributions
+        #that make up the likelihood for each observation. The mixture has one distribution
+        #centered at mu, one at mu + 10, and one at mu - 10, to account for off-by-one errors
+        #in the tens column. I use a student-t distribution with a low df (specifically 3)
+        #instead of a normal distribution to account for outliers (essentially as a form of
+        #robust regression). The censoring comes in two parts: interval censoring to account
+        #for rounding of observations (since the responses are all whole numbers), and 
+        #censoring at the endpoints to account for the bounded nature of the responses (from
+        #1 to 99).
+        for (i in 1:n) {
+            log_p[3] : real     #temp for mixture log probabilities
+    
+            for (k in 1:3) {
+                mode : real
+                concentration_minus_2 : real
+                alpha : real
+                beta : real
+                
+                #mode and concentration parameterization of beta dist; see Kruschke
+                # mu_offset = k * 10 - 20
+                # mode = mu[i] + mu_offset
+                mode = mu[i]
+                if      (mode < 0) { mode = 0 }
+                else if (mode > 1) { mode = 1 }
+                if (k == 1 && mode >= .1) {mode = mode - .1}
+                else if (k == 3 && mode <= .9) {mode = mode + .1}
+                concentration_minus_2 = 1/sigma_nu[i]
+                alpha = mode * concentration_minus_2 + 1
+                beta = (1 - mode) * concentration_minus_2 + 1
+                
+                # if (response[i] < .015) {
+                #     #censoring at < 1.5: the lowest recordable response appears to be
+                #     #1 (as an integer)
+                #     log_p[k] = beta_lcdf(.015  | alpha, beta)
+                # }
+                # else if (response[i] > .985) {
+                #     #censoring at > 98.5: the highest recordable response appears to be
+                #     #99 (as an integer)
+                #     log_p[k] = beta_lccdf(.985  | alpha, beta)
+                # }
+                # else {
+                #     #interval censoring: since responses were recorded only to whole digits,
+                #     #assume a response of x is an interval-censored response from somewhere
+                #     #in [x - 0.5, x + 0.5]
+                #     log_p[k] = log_diff_exp(
+                #         beta_lcdf(response[i] + 0.005  | alpha, beta),
+                #         beta_lcdf(response[i] - 0.005  | alpha, beta)
+                #     )
+                # }
+                # log_p[k] = log_p[k] + log(theta_k[k])
+
+                #theta_k[k] is the probability for this portion of the mixture distribution
+                log_p[k] = beta_lpdf(response[i] |  alpha, beta) + log(theta_k[k])
+            }
+            target %+=% log_sum_exp(log_p)
+        }
+    },
+    generated_quantities = {
+        k : vector[n]
+
+        for (i in 1:n) {
+            k[i] <- categorical_rng(theta_k)
+        }
+    }
+)
+m.sp.stan = stan_model(model_code = as.character(m.sp.meta))
+```
+
+```{r}
+fit.sp.v = vb(m.sp.stan, data = compose_data(sv.sp.beta), algorithm="meanfield")
+```
+
+```{r}
+fit = sampling(m.sp.stan, data = compose_data(sv.sp.beta)
+    # , iter=400
+    , init = function() {
+        list(
+            mu_intercept_raw = 0,
+            mu_b_p_raw = 0,
+            sigma_intercept_raw = 0,
+            sigma_v_participant_raw = rnorm(nlevels(sv.bars.beta$participant), 0, 1),
+            sigma_v_participant_sd = 1,
+            theta = .95
+        )
+    }
+    , control = list(adapt_delta = 0.9)
+    , iter = 2000 * 6
+    , thin = 6
+)
+```
+
+```{r}
+summary(fit, pars=c("mu_intercept","mu_b_p","theta","sigma_intercept","sigma_v_participant_sd"))
+precis(fit, pars=c("mu_intercept","mu_b_p","theta","sigma_intercept","sigma_v_participant_sd"))
+plot(fit, pars=c("mu_intercept","mu_b_p","theta_k2","sigma_intercept","sigma_v_participant_sd"))
+```
+
+```{r}
+alpha_beta = function(mu, sigma) {
+    mode = ifelse(mu < 0, 0, ifelse(mu > 1, 1, mu))
+    concentration_minus_2 = 1/sigma
+    list(
+        alpha = mode * concentration_minus_2 + 1,
+        beta = (1 - mode) * concentration_minus_2 + 1
+    )    
+}
+dresid = function(x, mu, sigma) alpha_beta(mu, sigma) %$% dbeta(x, alpha, beta)
+presid = function(x, mu, sigma) alpha_beta(mu, sigma) %$% pbeta(x, alpha, beta)
+rresid = function(x, mu, sigma) alpha_beta(mu, sigma) %$% rbeta(x, alpha, beta)
+
+samples = tidy_samples(fit, c(mu_intercept, mu_b_p, 
+    sigma_intercept,
+    sigma_v_participant_sd
+    )[]) %>%
+    inner_join(
+        tidy_samples(fit, theta_k[..]),
+        by = ".sample"
+    )
+
+
+fitted = 
+    tidy_samples(fit, c(mu, sigma_nu, k)[i]) %>%
+    mutate(
+        mode = ifelse(mu < 0, 0, ifelse(mu > 1, 1, mu)),
+        mode = ifelse(k == 1 & mode >= .1, mode - .1,
+               ifelse(k == 3 & mode <= .9, mode + .1,
+                   mode)),
+        # sigma_nu = rinvchisq(n(), 3, sigma),
+        predicted = rresid(n(), mode, sigma_nu),
+        predicted = ifelse(predicted < 0.01, 0.01, ifelse(predicted > .99, 0.99, predicted))
+    ) %>%
+    inner_join(mutate(sv.sp.beta, i = 1:n()))
+
+residuals = fitted %>%
+    group_by(i, p, response, participant) %>%
+    summarise(
+        # response_jitter = runif(1, response - 0.5, response + 0.5),
+        # p_resid = median(p_resid),
+        
+        #randomized quantile residuals
+        p_resid_max = mean(predicted < response + 0.005),
+        p_resid_max = ifelse(p_resid_max == 0, 1/n(), p_resid_max),
+        p_resid_min = mean(predicted < response - 0.005),
+        p_resid_min = ifelse(p_resid_min == 1, (n() - 1)/n(), p_resid_min),
+        p_resid = runif(1, p_resid_min, p_resid_max),
+        z_resid = qnorm(p_resid),
+        median_predicted = median(predicted),
+        predicted = sample(predicted, 1),
+        mu = mean(mu)
+    ) %>%
+    ungroup() %>%
+    mutate(
+        # z_resid = z_resid / sd(z_resid[is.finite(z_resid)]),
+        residual = predicted - response
+    )
+```
+
+```{r}
+residuals %>% flatworm(z_resid, participant, ylim=NA) + facet_wrap(~.cuts)
+```
+
+```{r}
+residuals %>% flatworm(z_resid, ylim=NA)
+```
+
+```{r}
+residuals %>% flatworm(z_resid, p)
+```
+
+```{r}
+pairs(fit, pars=c("mu_intercept_raw","mu_b_p_raw","theta","sigma_intercept","sigma_v_participant_sd"))
+pairs(fit, pars=c("sigma_intercept","sigma_v_participant_sd","sigma_v_participant[28]","sigma_v_participant[8]","sigma_v_participant[34]"))
+pairs(fit, pars=c("sigma_intercept","sigma_v_participant[1]","sigma_v_participant[2]","sigma_v_participant[3]"))
+```
+
+```{r}
+predictions = 
+    expand.grid(
+        p = seq(.01,.99,by=.01)
+    ) %>%
+    group_by(p) %>%
+    do({
+        cbind(., samples) %>%
+            group_by(.sample) %>%
+            mutate(
+                k = rcategorical(1, c(theta_k1, theta_k2, theta_k3))
+            ) %>%
+            ungroup() %>%
+            mutate(
+                sigma_v_participant = rnorm(n(), 0, sigma_v_participant_sd),
+                sigma = exp(sigma_intercept + sigma_v_participant),
+                sigma_nu = rinvchisq(n(), 3, sigma),
+                mu = mu_intercept + mu_b_p * (p - .50) + .50,
+                mode = ifelse(mu < 0, 0, ifelse(mu > 1, 1, mu)),
+                mode = ifelse(k == 1 & mode >= .1, mode - .1,
+                       ifelse(k == 3 & mode <= .9, mode + .1,
+                           mode)),
+                predicted = rresid(n(), mode, sigma_nu),
+                predicted = ifelse(predicted < .01, .01, ifelse(predicted > .99, .99, predicted))
+            )
+    }) %>%
+    mutate(error = predicted - p)
+```
+
+```{r}
+predictions %>%
+    filter(p %in% (1:10 * 10)) %>%
+    group_by(p) %>%
+    mutate(
+        mu = mu_intercept + mu_b_p * (p - 50) + 50,
+        predicted = rresid(n(), mu, sigma)
+    ) %>%
+    summarise(
+        above = mean(predicted > p + 5),
+        below = mean(predicted < p - 5),
+        theta2 = 1 - above - below
+    )
+```
+
+
+```{r}
+sv.sp.beta %>%
+    filter(vis == "squarepie") %>%
+    ggplot(aes(x = response - p)) +
+    stat_density(fill=NA, color="red") +
+    stat_density(aes(x=round(predicted, 2) - p), fill=NA, color="green", data=residuals, adjust=1)
+```
+
+```{r}
+fitted10 = fitted %>%
+    filter(.sample %in% 15:20)
+sv.sp.beta %>%
+    filter(vis == "squarepie") %>%
+    ggplot(aes(x = response - p)) +
+    stat_density(fill=NA, color="black", size=1.5) +
+    stat_density(aes(x=round(predicted, 2) - p, group = .sample), fill=NA, color="blue", data=fitted10, adjust=1) +
+    coord_cartesian(xlim=c(-.20,.20))
+```
+
+```{r}
+predictions %>%
+    select(-mu) %>% rename(mu = predicted) %>%
+    mean_qi(mu) %>%
+    ggplot(aes(x = p, y = mu)) +
+    geom_point(aes(y = response), data=sv.sp.beta, alpha=0.1) +
+    geom_ribbon(aes(ymin = mu.lower, ymax = mu.upper), alpha = 0.25) +
+    geom_abline(intercept = 0, slope = 1, color="gray50") +
+    geom_line(color="red")
+```
+
+```{r}
+predictions %>%
+    filter(.sample %in% 1:100) %>%
+    ggplot(aes(x = p, y = round(predicted,2))) +
+    geom_abline(intercept = 0, slope = 1, color="gray50") +
+    # geom_abline(intercept = .1, slope = 1, color="gray50") +
+    # geom_abline(intercept = -.1, slope = 1, color="gray50") +
+    geom_point(alpha=0.1)
+```
+

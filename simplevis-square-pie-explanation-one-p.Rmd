@@ -1,0 +1,102 @@
+---
+title: "Reanalysis of BELIV Paper Study Data"
+author: "Matthew Kay"
+date: "July 18, 2016"
+output: html_document
+---
+
+Based on `simpleviz-reanalysis.Rmd`.
+
+# Setup
+
+## Imports
+
+```{r setup}
+library(dplyr)
+library(ggplot2)
+library(metabayes)
+library(tidybayes)
+library(rstan)
+library(rethinking)
+import::from(gamlss, gamlss, random, re)
+import::from(gamlss.dist, 
+    NO, dNO, pNO, qNO, rNO, 
+    TF, dTF, pTF, qTF, rTF)
+import::from(gamlss.tr, gen.trun, trun.r)
+```
+
+## GGplot theme
+
+```{r theme}
+theme_set(theme_light())
+```
+
+## Stan setup
+
+```{r stan}
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+# Load and clean data
+
+First, reading in the data and doing a bit of work to calculate error and reorder and rename the charts. We called the study _simplevis_ back then, so _sv_ is the prefix for the datasets.
+
+```{r message=FALSE}
+sv <- read.csv("data/simplevis.csv") %>%
+    rename(
+        p = Value,
+        estimate = Estimate,
+        participant = ID,
+        vis = Type
+    )
+```
+
+
+# Explore first
+
+Let's see the shape of people's error. In particular, we're interested in Square Pie, which I suspect people are reading as two bar charts (one for the tens column and one for the ones column), so we should see two peaks at +-10 on either side of 0 for that chart.
+
+```{r}
+sv %>%
+    filter(vis == "bars") %>%
+    # filter(participant %in% paste0("p", 10:20)) %>%
+    ggplot(aes(x = p, y=estimate)) +
+    geom_point()  
+    # geom_line(aes(color = participant))
+    # stat_smooth(aes(group=participant), method=lm, se=FALSE)
+    # facet_wrap(~participant)
+```
+
+```{r}
+sv %>%
+    filter(vis == "squarepie") %>%
+    filter(participant %in% paste0("p", 10:20)) %>%
+    ggplot(aes(x = estimate-p)) +
+    stat_density() + 
+    geom_vline(xintercept = 0, linetype="dashed", color="red") +
+    geom_vline(xintercept = -10, linetype="dashed", color="red") +
+    geom_vline(xintercept = 10, linetype="dashed", color="red") 
+    # facet_wrap(~participant)
+```
+
+# One participant
+
+Let's take one participant and see what things look like:
+
+```{r}
+df = sv %>%
+    filter(vis == "bars", participant == "p22")
+```
+
+```{r}
+gen.trun(c(0,100), family="TF", type="both")
+gen.cens(c(1,99), family="TF", type="both")
+gen.trun(c(0,100), family="NO", type="both")
+m = gamlss(estimate ~ p, data = df, family=TFtr)
+m = gamlss(estimate ~ p, data = df, family=cauchy)
+m = gamlss(estimate ~ p, data = df, family=NOtr)
+m = gamlss(logit(estimate/100) ~ logit(p/100), data = df, family=TF)
+m = gamlss(logit(estimate/100) ~ logit(p/100), data = df, family=NO)
+m = gamlss(estimate/100 ~ logit(p/100), data = df, family=BE)
+```
