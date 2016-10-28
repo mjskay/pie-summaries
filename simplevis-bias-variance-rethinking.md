@@ -13,13 +13,13 @@ July 18, 2016
     -   [A conditional distribution for responses: the discrete truncated Student t](#a-conditional-distribution-for-responses-the-discrete-truncated-student-t)
     -   [Model specification](#model-specification)
     -   [Model diagnostics](#model-diagnostics)
-    -   [What does the fit look like?](#what-does-the-fit-look-like)
+    -   [What do predictions look like compared to the data?](#what-do-predictions-look-like-compared-to-the-data)
     -   [Next steps](#next-steps)
         -   [Modeling the round-to-5 process](#modeling-the-round-to-5-process)
-        -   [Modeling precision at the endpoints and at the halfway mark](#modeling-precision-at-the-endpoints-and-at-the-halfway-mark)
+        -   [Modeling cyclical bias and variance](#modeling-cyclical-bias-and-variance)
 -   [Mixture model for square pie (IN PROGRESS; IGNORE)](#mixture-model-for-square-pie-in-progress-ignore)
 
-Based on data from `simpleviz-reanalysis.Rmd`. See also Robert Kosara's [blog post](https://eagereyes.org/blog/2016/a-reanalysis-of-a-study-about-square-pie-charts-from-2009) on this data, which discusses population mean error and bias, but does not get into individual-level bias (nor individual-level variance). I wanted to delve more into *individuals'* bias and variance in their estimates, and explore the idea of mode-unbiasedness (as opposed to mean-unbiasedness), as I think mode-unbiasedness is a more useful property to look at in estimates like this.
+Based on data from `simpleviz-reanalysis.Rmd`. See also Robert Kosara's [blog post](https://eagereyes.org/blog/2016/a-reanalysis-of-a-study-about-square-pie-charts-from-2009) on this data, which discusses population mean error and bias. This is an attempt to tease apart some additional issues, like individual-level variance versus population variance, mode-unbiasedness (in contrast to mean-unbiasedness), digit preference in responses. The general thrust is to try to predict responses at the individual level.
 
 Setup
 =====
@@ -105,7 +105,7 @@ Let's see the shape of people's error. We will particularly be interested in `sq
 sv %>%
     ggplot(aes(x = p, y=response)) +
     geom_point(alpha = 0.2, size = 1) +
-    geom_abline(intercept = 0, slope=1, size = .5) + 
+    geom_abline(intercept = 0, slope=1, size = .5) +
     stat_smooth(method = lm, color="red", se=FALSE) +
     facet_wrap(~vis)
 ```
@@ -230,9 +230,9 @@ for (s in c(1.5, 4, 8, 10)) {
 
 As a result, what looks like bias when we examine the mean may actually be variance in responses if we instead consider bias with respect to the mode. Increasingly I have come to believe that mode-unbiasedness is a more useful property to talk about in these kinds of tasks than the more commonly (usually implicit discussed) mean-unbiasedness, because with almost any meaningful variance near a ceiling or floor *any* process will appear to have a biased mean, but may not have a biased mode.
 
-To deal with outliers, I employ a Student t distribution intead of a Normal distribution. This is a common "quick-and-dirty" way to get robust regression: compared to the Normal distribution, the Student t distribution has fatter tails. This means that we *expect* to see more observations off in the tails away from the mode, so when those observations show up they don't drag our mode as far towards them as would happen if we assumed responses were Normally distributed. In fact, we can parameterize tail fatness---that is, learn how likely we should find outliers to be: here, `nu`, sometimes called the *degrees of freedom*, determines how fat tails are. When `nu` is closer to 0, the tails are fatter; as `nu` goes to infinity the t distribution becomes the Normal distribution. (I will actually use an alternative parameterization of the Student t dsitribution in terms of standard deviation and `nuprime`, where `nuprime = nu + 2` in the usual parameterization, and with the restriction `nuprime > 0`, i.e. `nu > 2`. This alternative parameterization ensures the response distribution has finite variance, and tends to converge more easily).
+To deal with outliers, I employ a Student t distribution intead of a Normal distribution. This is a common "quick-and-dirty" way to get robust regression: compared to the Normal distribution, the Student t distribution has fatter tails. This means that we *expect* to see more observations off in the tails away from the mode, so when those observations show up they don't drag our mode as far towards them as would happen if we assumed responses were Normally distributed. In fact, we can parameterize tail fatness---that is, learn how likely we should find outliers to be: here, `nu`, sometimes called the *degrees of freedom*, determines how fat tails are. When `nu` is closer to 0, the tails are fatter; as `nu` goes to infinity the t distribution becomes the Normal distribution. (I will actually use an alternative parameterization of the Student t dsitribution in terms of standard deviation and `nuprime`, where `nuprime = nu + 2` in the usual parameterization, and with the restriction `nuprime > 0`, i.e. `nu > 2`. Because the variance of the t distribution is not finite for `nu <= 2`, this alternative parameterization ensures the response distribution has finite variance, and also tends to converge more easily).
 
-To deal with the fact that responses were recorded as whole numbers, I will use discretization. This approach used could also be thought of as interval censoring at +- .5 around whole numbers, or as measurement error---people's responses were only recorded to the nearest whole number, and this approach accounts for the error introduced by that discretization. Put another way, it assumes that for every whole number `x` from 1 to 99, any answer that would be between `x - 0.5` and `x + 0.5` would be rounded to `x`.
+To deal with the fact that responses were recorded as whole numbers, I will use discretization. This approach could also be thought of as interval censoring at +- .5 around whole numbers, or as measurement error---people's responses were only recorded to the nearest whole number, and this approach accounts for the error introduced by that discretization. Put another way, it assumes that for every whole number `x` from 1 to 99, any answer that would be between `x - 0.5` and `x + 0.5` would be rounded to `x`. (*N.B. later I will discuss the rounding-to-5 problem; still need to incorporate that into the model*)
 
 I considered instead using a mode parameterization of a beta distribution, but was unable to get that to fit effectively in Stan when working with mixture models for the squarepie later on. The beta distribution also does not handle fatter tails / outliers (though I considered another modification to the beta distribution that could handle fatter tails, but also had trouble with fitting in squarepie). Probably these are my limitations and not Stan's, so I will probably return to trying out that sort of model when I get a chance.
 
@@ -378,7 +378,7 @@ residuals %>% flatworm(z_resid, cut(p, breaks=c(0,20,40,60,80,100)), z_cubic=T, 
 
 ![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-17-1.png)
 
-It does *okay*. The fit could be better, and we'll look later at possible extensions to the model.
+It does *okay*, ish.
 
 We can also ask how well it fits different participants:
 
@@ -388,7 +388,7 @@ residuals %>% flatworm(z_resid, participant, ylim=NA, z_cubic=T, loess=F) + face
 
 ![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-18-1.png)
 
-The "worms" are within the +-2 se bands for the most part. We have a few people whose responses may be a little odd, but not completely awful. Probably there is some work to be done improving this model (some suggestions on that later).
+The many of the "worms" are within the +-2 se bands, but we definitely have people whose responses are not well-fit by this model. Probably there is some work to be done improving this model (e.g. handling digit preferences, accounting for cyclical bias and variance. More on those later).
 
 Another way of looking at this is to ask if the predicted distribution of errors (in blue) looks similar to the actual distribution of errors (in red):
 
@@ -402,8 +402,8 @@ sv.bars %>%
 
 ![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-19-1.png)
 
-What does the fit look like?
-----------------------------
+What do predictions look like compared to the data?
+---------------------------------------------------
 
 Let's get some predictions for responses along the domain of 1 to 99:
 
@@ -514,7 +514,7 @@ mean(sv.bars$response %% 5 == 0)
 
     ## [1] 0.6229167
 
-~60% of the time! Given that the true proportions should be ~20% 0 or 5 and ~80% everything else, we can get a back-of-the-napkin estimate for how often people are rounding to 0/5:
+~60% of the time! Given that the true proportions should be ~20% 0 or 5 and ~80% everything else, we can get a back-of-the-napkin estimate for how often people are rounding to 0 or 5:
 
 ``` r
 (mean(sv.bars$response %% 5 == 0) - .2) / .8
@@ -537,7 +537,7 @@ residuals %>%
 
 ![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-30-1.png)
 
-These predictions look a little closer to what the actual data looks like!
+These predictions look a little closer to what the actual data looks like.
 
 Next steps
 ----------
@@ -546,15 +546,48 @@ Next steps
 
 One potential extension to this model would be to add the round-to-5 step to the model itself to better estimate how often people tend to round their responses off this way. It would also be interesting to look at whether this is a function of participant: do some people do this rounding process and others do not, or does each individual tend to report more 0s and 5s in a similar proportion, or some combination of those? A hierarchical model would help answer this question, by estimating a round-to-5 probability for each individual and also estimating the variance in the proportion of rounding-to-5 that people do. Low variance might imply everyone doing a similar rounding process, high variance might imply some people rounding a lot and others doing little rounding.
 
-### Modeling precision at the endpoints and at the halfway mark
+### Modeling cyclical bias and variance
 
-It's also worth noting that people's estimates look to be a little more precise at the endpoints and in the middle (at 50) than our model predicts them to be. This makes sense: estimating the location of the endpoints and the halfway mark is probably easier: people can "see" when the bar is basically 0, basically 100, or *just* cuts the distance in half. We could attempt to model this relationship as well, for example by making variance a function of distance from the endpoints and halfway mark; e.g. add a coefficient to the linear submodel for sigma that is multiplied by a curve like this:
+There's also the question of cyclical bias and variance. People's estimates look to be a little more precise at the endpoints and in the middle (at 50) than our model predicts them to be. This makes sense: estimating the location of the endpoints and the halfway mark is probably easier: people can "see" when the bar is basically 0, basically 100, or *just* cuts the distance in half. Here are cyclical patterns in variance (as measured using MAD):
+
+``` r
+sv %>%
+    group_by(p, vis) %>%
+    summarise(mad = mad(response), response = mean(response), n=n()) %>%
+    ggplot(aes(x = p, y=mad)) +
+    geom_point(alpha = 0.2) +
+    #span = 0.25 puts the loess smoothing window at a quarter of the data, which
+    #should help us see cyclical patterns at that frequency
+    stat_smooth(method = loess, color="red", se=FALSE, method.args=list(span=0.25)) +
+    facet_wrap(~vis) + 
+    geom_vline(xintercept = seq(0,100,length.out=9)) 
+```
+
+![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-31-1.png)
+
+We could attempt to model this relationship, for example by making variance a function of distance from the endpoints and halfway mark; e.g. add a coefficient to the linear submodel for sigma that is multiplied by a curve like this (and maybe one harmonic of this curve):
 
 ``` r
 curve(-cos(x*pi/25),xlim=c(0,100),n=1001)
 ```
 
-![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-31-1.png)
+![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-32-1.png)
+
+We could also try to extend models like those proposed in [this paper](10.1037//0033-295X.107.3.500) that predict cyclical *bias* (not *variance*) in the presence of reference points to individual observations. It's hard to see, but some cyclical bias similar in shape to that predicted by the model in that paper does appear to be present in all conditions except squarepie:
+
+``` r
+sv %>%
+    ggplot(aes(x = p, y=response - p)) +
+    geom_point(alpha = 0.2) +
+    #span = 0.25 puts the loess smoothing window at a quarter of the data, which
+    #should help us see cyclical patterns at that frequency
+    stat_smooth(method = loess, color="red", se=FALSE, method.args=list(span=0.25)) +
+    facet_wrap(~vis) + 
+    geom_vline(xintercept = seq(0,100,length.out=9)) +
+    coord_cartesian(ylim=c(-10,10))
+```
+
+![](simplevis-bias-variance-rethinking_files/figure-markdown_github/unnamed-chunk-33-1.png)
 
 Mixture model for square pie (IN PROGRESS; IGNORE)
 ==================================================
