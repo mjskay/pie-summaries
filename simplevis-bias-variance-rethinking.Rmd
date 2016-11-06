@@ -77,7 +77,7 @@ head(sv)
 
 Let's see the shape of people's error. We will particularly be interested in `squarepie`, which I suspect people are reading essentially as two bar charts (one for the tens column and one for the ones column), but let's start by looking at all of the responses versus the actual probability. We'll include the line `y = x` (black line) and a plain-old linear regression (red) to get a sense of the shape of things:
 
-```{r, fig.width=10, fig.height=10}
+```{r, fig.width=10, fig.height=7}
 sv %>%
     ggplot(aes(x = p, y=response)) +
     geom_point(alpha = 0.2, size = 1) +
@@ -90,7 +90,7 @@ Overall, the first impression here is that people's estimates look pretty good i
 
 We're also seeing something odd in `squarepie`: there are two faint lines in the error parallel to the central line. Theses lines are at exactly `+-10` from `y = x`. One way to think of a square pie graph might be that it decomposes into two bar graphs: a vertical one representing the 10s column of `p` (0, 10, 20, ...), and a horizontal bar graph stuck on top of it representing the ones column (0, 1, 2, 3, ...). Thus, say the true value (`p`) is `36` and someone misreads the tens column as `4`, they might respond with `45` or `46` or `47`. We can see this phenomenon more easily by looking at density plots of the error (the difference between people's responses and the actual probability depicted):
 
-```{r, fig.width=10, fig.height=8}
+```{r, fig.width=10, fig.height=7}
 sv %>%
     ggplot(aes(x = response - p)) +
     stat_density() +
@@ -160,6 +160,7 @@ data_frame(
     annotate("text", x = 5.1, y = t_label_y, label="Truncated Student t distribution (nu = 4)", hjust=0) +
     annotate("segment", x = 3, y = discrete_label_y, xend=5, yend = discrete_label_y) +
     annotate("text", x = 5.1, y = discrete_label_y, label="Discrete truncated Student t distribution", hjust=0) +
+    scale_y_continuous(breaks=0) +
     xlab("response") +
     ylab("p(response)")
 ```
@@ -188,6 +189,7 @@ for (s in c(1.5, 4, 8, 10)) {
         geom_segment(aes(xend = x, y = 0, yend = p), size = 1.5) +
         geom_vline(xintercept = mu, color="red", size=1) +
         geom_vline(xintercept = mean., color="blue", linetype="dashed", size=1) +
+        scale_y_continuous(breaks=0) +
         xlab("response") +
         ylab("p(response)")
     )
@@ -339,7 +341,7 @@ Let's get some predictions for responses along the domain of 1 to 99:
 
 ```{r}
 samples = fit.bars %>%
-    tidy_samples(c(mu_intercept, mu_bp, sigma_intercept, sigma_intercept_v_sigma, nuprime)[])
+    gather_samples(mu_intercept, mu_bp, sigma_intercept, sigma_intercept_v_sigma, nuprime)
 
 predictions = 
     data_frame(p = 1:99) %>%
@@ -489,7 +491,7 @@ sv %>%
     stat_smooth(method = loess, color="red", se=FALSE, method.args=list(span=0.25)) +
     facet_wrap(~vis) + 
     geom_vline(xintercept = seq(0,100,length.out=9)) +
-    coord_cartesian(ylim=c(-10,10))
+    coord_cartesian(ylim=c(-4,4))
 ```
 
 # Mixture model for square pie (IN PROGRESS; IGNORE)
@@ -644,21 +646,18 @@ plot(fit, pars=c("mu_intercept","mu_b_p","theta_k2","sigma_intercept","sigma_v_p
 ```{r, eval=FALSE}
 gen.trun(c(0.5,99.5), family="TF", type="both")
 
-samples = tidy_samples(fit, c(
-    mu_intercept, mu_b_p, 
-    sigma_intercept,
-    sigma_v_participant_sd,
-    nu
-    )[]) %>%
-    inner_join(
-        tidy_samples(fit, theta_k[..]),
-        by = ".sample"
+samples = fit %>%
+    gather_samples(
+        mu_intercept, mu_b_p, 
+        sigma_intercept,
+        sigma_v_participant_sd,
+        nu,
+        theta_k[..]
     )
 
 
-fitted = 
-    tidy_samples(fit, c(mu, mu_offset, sigma)[i]) %>%
-    inner_join(tidy_samples(fit, nu[])) %>%
+fitted = fit %>%
+    gather_samples(nu, c(mu, mu_offset, sigma)[i]) %>%
     mutate(
         predicted = rdtstudent(n(), nu, mu + mu_offset, sigma, lower=1, upper=99),
         predicted = round(predicted)
